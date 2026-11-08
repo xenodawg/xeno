@@ -30,7 +30,107 @@ jobs:
         with:
           persist-credentials: false
       - name: Extract prepared iPhone project
-        run: unzip -q -o Relay-iPhone-source.zip
+        run: |
+          unzip -q -o Relay-iPhone-source.zip
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p = Path('relay/Sources/Networking.swift')
+          s = p.read_text()
+          assert hashlib.sha256(s.encode()).hexdigest() == '1d087904aef9e57d82e35f59ec4b084d3c1a57cd49d1187427a76e1da15cc67e'
+          s = s.replace('import Security\n', 'import Security\nimport LocalAuthentication\n')
+          s = s.replace('    [\n      kSecClass as String:', '    let context = LAContext(); context.interactionNotAllowed = true\n    return [\n      kSecClass as String:')
+          s = s.replace('      kSecClass as String: kSecClassGenericPassword,\n', '      kSecClass as String: kSecClassGenericPassword,\n      kSecUseAuthenticationContext as String: context,\n')
+          s = s.replace('timeoutIntervalForResource = 30', 'timeoutIntervalForResource = 120')
+          s = s.replace('idempotencyKey: String? = nil\n', 'idempotencyKey: String? = nil, maximumResponseBytes: Int = 8 * 1024 * 1024\n')
+          s = s.replace('    try Task.checkCancellation()\n    var request = URLRequest', '    try Task.checkCancellation()\n    guard maximumResponseBytes > 0 && maximumResponseBytes <= 16 * 1024 * 1024 else { throw BackendError.responseTooLarge }\n    var request = URLRequest')
+          assert hashlib.sha256(s.encode()).hexdigest() == '0a88e26c7efca2489c616aab9008c82c13f5609b6d278ab863963a2e52b8b490'
+          p.write_text(s)
+          p = Path('relay/ios/Relay.xcodeproj/project.pbxproj')
+          s = p.read_text().replace('CURRENT_PROJECT_VERSION = 8;', 'CURRENT_PROJECT_VERSION = 9;').replace('MARKETING_VERSION = 0.4.0;', 'MARKETING_VERSION = 0.5.0;')
+          assert hashlib.sha256(s.encode()).hexdigest() == '559463e4b4bbe46d94b5d6399d47b84951283ba5d3ced25d5c82dc24e38fffcb'
+          p.write_text(s)
+          PY          p.write_text(s)
+          p = Path('relay/ios/Sources/RelayPhone.swift')
+          s = p.read_text().replace('.environmentObject(store).tint(.blue)', '.environmentObject(store).tint(.blue).modifier(PhoneUpdateNotice())')
+          old = 'Section("Updates") { Text("iPhone updates are managed by the App Store, TestFlight, or your sideloading tool. Relay cannot replace its own iOS app binary.") }'
+          assert old in s
+          s = s.replace(old, 'PhoneUpdateSettings()')
+          s += r'''
+
+          @MainActor final class PhoneUpdates: ObservableObject {
+            struct Release: Decodable {
+              let tag_name: String
+              let html_url: URL
+              let draft: Bool
+              let prerelease: Bool
+            }
+            @Published var available: Release?
+            @Published var checking = false
+            @Published var message = "Checks automatically when Relay opens."
+            @Published var showNotice = false
+            private var lastCheck = Date.distantPast
+            private var notifiedTag: String?
+            var installed: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0" }
+            var build: Int { Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0") ?? 0 }
+            func check(force: Bool = false) async {
+              guard !checking, force || Date().timeIntervalSince(lastCheck) > 21600 else { return }
+              checking = true
+              defer { checking = false }
+              do {
+                var request = URLRequest(url: URL(string: "https://api.github.com/repos/xenodawg/xeno/releases?per_page=30")!)
+                request.timeoutInterval = 20
+                request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200, data.count < 2_000_000 else { throw URLError(.badServerResponse) }
+                let releases = try JSONDecoder().decode([Release].self, from: data)
+                let candidates = releases.filter { !$0.draft && !$0.prerelease && $0.tag_name.hasPrefix("iphone-") && $0.html_url.scheme == "https" && $0.html_url.host == "github.com" && $0.html_url.path.hasPrefix("/xenodawg/xeno/releases/") }
+                var newest: Release?
+                var newestBuild = build
+                for release in candidates {
+                  let parts = release.tag_name.split(separator: "-")
+                  guard parts.count == 3, let number = Int(parts[2]), number > newestBuild else { continue }
+                  newest = release
+                  newestBuild = number
+                }
+                lastCheck = Date()
+                available = newest
+                message = newest == nil ? "You're up to date." : "A newer iPhone version is available."
+                if let newest, newest.tag_name != notifiedTag {
+                  notifiedTag = newest.tag_name
+                  showNotice = true
+                }
+              } catch { message = "Couldn't check for updates. Try again later." }
+            }
+          }
+          struct PhoneUpdateNotice: ViewModifier {
+            @StateObject private var updates = PhoneUpdates()
+            @Environment(\.scenePhase) private var phase
+            func body(content: Content) -> some View {
+              content.environmentObject(updates)
+                .task { await updates.check() }
+                .onChange(of: phase) { _, value in if value == .active { Task { await updates.check() } } }
+                .alert("Relay update available", isPresented: $updates.showNotice) {
+                  if let release = updates.available { Link("Download IPA", destination: release.html_url) }
+                  Button("Later", role: .cancel) { }
+                } message: { Text("Download the new IPA and install it using Sideloadly with the same Apple ID and bundle ID. You don't need to delete Relay.") }
+            }
+          }
+          struct PhoneUpdateSettings: View {
+            @EnvironmentObject var updates: PhoneUpdates
+            var body: some View {
+              Section("Updates") {
+                Text("Relay " + updates.installed + " (" + String(updates.build) + ")")
+                Text(updates.message).foregroundStyle(.secondary)
+                Button(updates.checking ? "Checking..." : "Check for Updates") { Task { await updates.check(force: true) } }.disabled(updates.checking)
+                if let release = updates.available { Link("Download Latest IPA", destination: release.html_url) }
+                Text("Sideloadly renews signing automatically. New versions install through Sideloadly using the same Apple ID and bundle ID.").font(.footnote).foregroundStyle(.secondary)
+              }
+            }
+          }
+          '''.replace(chr(28), chr(92))
+          p.write_text(s)
+          PY
       - name: Build real iPhone arm64 application and package IPA
         run: bash relay/ios/build-ipa.sh unsigned
       - name: Upload unsigned IPA for re-signing
