@@ -1,3 +1,4 @@
+
 name: Build Relay iPhone IPA
 on:
   workflow_dispatch:
@@ -50,7 +51,6 @@ jobs:
           s = p.read_text().replace('CURRENT_PROJECT_VERSION = 8;', 'CURRENT_PROJECT_VERSION = 9;').replace('MARKETING_VERSION = 0.4.0;', 'MARKETING_VERSION = 0.5.0;')
           assert hashlib.sha256(s.encode()).hexdigest() == '559463e4b4bbe46d94b5d6399d47b84951283ba5d3ced25d5c82dc24e38fffcb'
           p.write_text(s)
-          PY          p.write_text(s)
           p = Path('relay/ios/Sources/RelayPhone.swift')
           s = p.read_text().replace('.environmentObject(store).tint(.blue)', '.environmentObject(store).tint(.blue).modifier(PhoneUpdateNotice())')
           old = 'Section("Updates") { Text("iPhone updates are managed by the App Store, TestFlight, or your sideloading tool. Relay cannot replace its own iOS app binary.") }'
@@ -128,7 +128,7 @@ jobs:
               }
             }
           }
-          '''.replace(chr(28), chr(92))
+          '''
           p.write_text(s)
           PY
       - name: Build real iPhone arm64 application and package IPA
