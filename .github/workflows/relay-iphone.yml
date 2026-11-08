@@ -23,6 +23,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   unsigned-ipa:
+    permissions:
+      contents: write
     if: github.event_name != 'workflow_dispatch' || inputs.signing == 'unsigned'
     runs-on: macos-15
     timeout-minutes: 25
@@ -111,7 +113,7 @@ jobs:
                 .task { await updates.check() }
                 .onChange(of: phase) { _, value in if value == .active { Task { await updates.check() } } }
                 .alert("Relay update available", isPresented: $updates.showNotice) {
-                  if let release = updates.available { Link("Download IPA", destination: release.html_url) }
+                  if let release = updates.available { Button("Download IPA") { UIApplication.shared.open(release.html_url) } }
                   Button("Later", role: .cancel) { }
                 } message: { Text("Download the new IPA and install it using Sideloadly with the same Apple ID and bundle ID. You don't need to delete Relay.") }
             }
@@ -140,6 +142,22 @@ jobs:
           path: relay/ios/build/Relay-iPhone-unsigned.ipa
           if-no-files-found: error
           retention-days: 14
+      - name: Publish iPhone release for automatic update checks
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          plist=relay/ios/build/derived/Build/Products/Release-iphoneos/Relay.app/Info.plist
+          version=$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$plist")
+          build=$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$plist")
+          tag="iphone-$version-$build"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release already exists; keeping its published IPA. Increment the build number for new releases."
+          else
+            gh release create "$tag" relay/ios/build/Relay-iPhone-unsigned.ipa --target "$GITHUB_SHA" --title "Relay iPhone $version (build $build)" --notes "Unsigned iPhone IPA. Includes automatic update checks in Relay. Install over the existing app through Sideloadly using the same Apple ID and bundle ID. Requires iOS 17 or later."
+          fi
   signed-ipa:
     if: github.event_name == 'workflow_dispatch' && inputs.signing != 'unsigned'
     runs-on: macos-15
