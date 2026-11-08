@@ -1,0 +1,90 @@
+name: Build Relay iPhone IPA
+on:
+  workflow_dispatch:
+    inputs:
+      signing:
+        description: 'Unsigned for re-signing, or signed with configured Apple secrets'
+        required: true
+        default: unsigned
+        type: choice
+        options: [unsigned, ad-hoc, app-store-connect]
+  push:
+    paths:
+      - 'Relay-iPhone-source.zip'
+      - 'relay/ios/**'
+      - 'relay/Sources/Networking.swift'
+      - 'relay/Sources/LiveAPI.swift'
+      - '.github/workflows/relay-iphone.yml'
+permissions:
+  contents: read
+concurrency:
+  group: relay-iphone-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  unsigned-ipa:
+    if: github.event_name != 'workflow_dispatch' || inputs.signing == 'unsigned'
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Extract prepared iPhone project
+        run: unzip -q -o Relay-iPhone-source.zip
+      - name: Build real iPhone arm64 application and package IPA
+        run: bash relay/ios/build-ipa.sh unsigned
+      - name: Upload unsigned IPA for re-signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Relay-iPhone-unsigned
+          path: relay/ios/build/Relay-iPhone-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
+  signed-ipa:
+    if: github.event_name == 'workflow_dispatch' && inputs.signing != 'unsigned'
+    runs-on: macos-15
+    timeout-minutes: 25
+    environment: ios-signing
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_P12_BASE64 }}
+      CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_P12_PASSWORD }}
+      PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE_BASE64 }}
+      SIGNING_MODE: ${{ inputs.signing }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Extract prepared iPhone project
+        run: unzip -q -o Relay-iPhone-source.zip
+      - name: Configure temporary signing keychain
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 relay/ios/prepare-signing.py
+          source "$RUNNER_TEMP/relay-signing.env"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/relay-distribution.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security cms -D -i "$RUNNER_TEMP/relay.mobileprovision" > "$RUNNER_TEMP/relay-profile.plist"
+          python3 relay/ios/install-profile.py
+      - name: Archive and export signed IPA
+        run: bash relay/ios/build-ipa.sh "$SIGNING_MODE"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Relay-iPhone-signed
+          path: relay/ios/build/export/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+      - name: Remove temporary credentials
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/relay-signing.env" ]]; then
+            source "$RUNNER_TEMP/relay-signing.env"
+            security delete-keychain "$KEYCHAIN" || true
+          fi
+          python3 relay/ios/cleanup-signing.py
