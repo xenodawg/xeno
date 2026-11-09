@@ -59,7 +59,7 @@ jobs:
           device=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for a in d["devices"].values() for x in a if "iPhone" in x["name"]))')
           xcrun simctl boot "$device" || true
           xcrun simctl bootstatus "$device" -b
-          xcodebuild -project relay/ios/Relay.xcodeproj -scheme Relay -configuration Debug -sdk iphonesimulator -destination "id=$device" -derivedDataPath relay/ios/build/simulator CODE_SIGNING_ALLOWED=NO build > relay/ios/build/simulator-build.log 2>&1 || { tail -100 relay/ios/build/simulator-build.log; exit 1; }
+          xcodebuild -project relay/ios/Relay.xcodeproj -scheme Relay -configuration Debug -sdk iphonesimulator -destination "id=$device" -derivedDataPath relay/ios/build/simulator -clonedSourcePackagesDirPath relay/ios/build/derived/SourcePackages ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO build > relay/ios/build/simulator-build.log 2>&1 || { tail -100 relay/ios/build/simulator-build.log; exit 1; }
           xcrun simctl install "$device" relay/ios/build/simulator/Build/Products/Debug-iphonesimulator/Relay.app
           xcrun simctl launch "$device" com.iblack.relay.ios
           sleep 3
